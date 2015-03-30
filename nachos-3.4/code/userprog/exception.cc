@@ -103,6 +103,7 @@ ExceptionHandler(ExceptionType which)
 	int arg1 = machine->ReadRegister(4);
 	int arg2 = machine->ReadRegister(5);
 	int arg3 = machine->ReadRegister(6);
+	int badVirtualAddress = machine->ReadRegister(39);
 	int Result;
 	int i, j;
 	char *ch = new char [500];
@@ -195,13 +196,15 @@ ExceptionHandler(ExceptionType which)
 				// Calculate needed memory space
 				AddrSpace *space;
 				space = new AddrSpace(executable);
-				delete executable;
-				// Do we have enough space?
+
+				
+
 				if(!currentThread->killNewChild)	// If so...
 				{
 					Thread* execThread = new Thread("thrad!");	// Make a new thread for the process.
 					execThread->space = space;	// Set the address space to the new space.
 					execThread->setID(threadID);	// Set the unique thread ID
+					space->GenerateSWAP(executable, threadID);
 					activeThreads->Append(execThread);	// Put it on the active list.
 					machine->WriteRegister(2, threadID);	// Return the thread ID as our Exec return variable.
 					threadID++;	// Increment the total number of threads.
@@ -212,6 +215,7 @@ ExceptionHandler(ExceptionType which)
 					machine->WriteRegister(2, -1 * (threadID + 1));	// Return an error code
 					currentThread->killNewChild = false;	// Reset our variable
 				}
+				delete executable;
 				break;	// Get out.
 			}
 			case SC_Join :	// Join one process to another.
@@ -250,8 +254,13 @@ ExceptionHandler(ExceptionType which)
 				else
 					printf("ERROR: Process %i exited abnormally!\n", currentThread->getID());
 				
-				if(currentThread->space)	// Delete the used memory from the process.
+				
+	
+				if(currentThread->space){
+					// Delete the used memory from the process.
+					currentThread->space->KillSWAP(currentThread->getID());
 					delete currentThread->space;
+				}
 				currentThread->Finish();	// Delete the thread.
 
 				break;
@@ -279,53 +288,81 @@ ExceptionHandler(ExceptionType which)
 		printf("ERROR: ReadOnlyException, called by thread %i.\n",currentThread->getID());
 		if (currentThread->getName() == "main")
 			ASSERT(FALSE);  //Not the way of handling an exception.
-		if(currentThread->space)	// Delete the used memory from the process.
+		if(currentThread->space){
+			currentThread->space->KillSWAP(currentThread->getID());
 			delete currentThread->space;
+		}
 		currentThread->Finish();	// Delete the thread.
 		break;
 	case BusErrorException :
 		printf("ERROR: BusErrorException, called by thread %i.\n",currentThread->getID());
 		if (currentThread->getName() == "main")
 			ASSERT(FALSE);  //Not the way of handling an exception.
-		if(currentThread->space)	// Delete the used memory from the process.
+		if(currentThread->space){
+			currentThread->space->KillSWAP(currentThread->getID());
 			delete currentThread->space;
+		}
 		currentThread->Finish();	// Delete the thread.
 		break;
 	case AddressErrorException :
 		printf("ERROR: AddressErrorException, called by thread %i.\n",currentThread->getID());
 		if (currentThread->getName() == "main")
 			ASSERT(FALSE);  //Not the way of handling an exception.
-		if(currentThread->space)	// Delete the used memory from the process.
+		if(currentThread->space){
+			currentThread->space->KillSWAP(currentThread->getID());
 			delete currentThread->space;
+		}
 		currentThread->Finish();	// Delete the thread.
 		break;
 	case OverflowException :
 		printf("ERROR: OverflowException, called by thread %i.\n",currentThread->getID());
 		if (currentThread->getName() == "main")
 			ASSERT(FALSE);  //Not the way of handling an exception.
-		if(currentThread->space)	// Delete the used memory from the process.
+		if(currentThread->space){
+			currentThread->space->KillSWAP(currentThread->getID());
 			delete currentThread->space;
+		}
 		currentThread->Finish();	// Delete the thread.
 		break;
 	case IllegalInstrException :
 		printf("ERROR: IllegalInstrException, called by thread %i.\n",currentThread->getID());
 		if (currentThread->getName() == "main")
 			ASSERT(FALSE);  //Not the way of handling an exception.
-		if(currentThread->space)	// Delete the used memory from the process.
+		if(currentThread->space){
+			currentThread->space->KillSWAP(currentThread->getID());
 			delete currentThread->space;
+		}
 		currentThread->Finish();	// Delete the thread.
 		break;
 	case NumExceptionTypes :
 		printf("ERROR: NumExceptionTypes, called by thread %i.\n",currentThread->getID());
 		if (currentThread->getName() == "main")
 			ASSERT(FALSE);  //Not the way of handling an exception.
-		if(currentThread->space)	// Delete the used memory from the process.
+		if(currentThread->space){
+			currentThread->space->KillSWAP(currentThread->getID());
 			delete currentThread->space;
+		}
 		currentThread->Finish();	// Delete the thread.
 		break;
 	case PageFaultException :
+		//printf("\nERROR: PageFaultException, called by thread %i.", currentThread->getID());
 
-		printf("\nERROR: PageFaultException, called by thread %i.\n args: %p, %p, %p", currentThread->getID(), arg1, arg2, arg3);
+		if(currentThread->space->PageFaultLoadPage(badVirtualAddress, currentThread->getID())) {
+			printf("\nHalt, called by thread %i.\n",currentThread->getID());
+			
+			int size = activeThreads->getSize();
+			for(int i = 0; i < size; i++) {
+				Thread* deadThread = (Thread*)activeThreads->Remove();
+
+				if(deadThread->space) {
+					deadThread->space->KillSWAP(deadThread->getID());
+					//delete deadThread->space;
+				}
+				activeThreads->Append(deadThread);
+				//deadThread->Finish();
+ 			}
+			interrupt->Halt();
+		}
 
 		break;
 		default :
