@@ -19,6 +19,7 @@
 #include "system.h"
 #include "addrspace.h"
 #include "noff.h"
+#include <stdio.h>
 
 //----------------------------------------------------------------------
 // SwapHeader
@@ -57,12 +58,39 @@ SwapHeader (NoffHeader *noffH)
 //	"executable" is the file containing the object code to load into memory
 //----------------------------------------------------------------------
 
+extern int swapMode;
+static Semaphore invPageTableSemaphore("Inverted Page Table", 1);
+
+static struct {
+	int time;
+	int process;
+	Thread* processThread;
+	int page;
+} invPageTable[32];
+
 AddrSpace::AddrSpace(OpenFile *executable)
 {
+	static int invPageTableNotYetLoaded = 1;
+	if(invPageTableNotYetLoaded) {
+		
+		invPageTableSemaphore.P();
+
+		for(int i = 0; i < 32; i++) {
+			invPageTable[i].time = 0;
+			invPageTable[i].process = -1;
+			invPageTable[i].page = -1;
+			invPageTable[i].processThread = NULL;
+		}
+
+		invPageTableNotYetLoaded = 0;
+		
+		invPageTableSemaphore.V();
+	}
+
 	pageTable = NULL;
 
     NoffHeader noffH;
-    unsigned int i, size, pAddr, counter;
+    unsigned int i, size;
 
     executable->ReadAt((char *)&noffH, sizeof(noffH), 0);
     if ((noffH.noffMagic != NOFFMAGIC) && 
@@ -88,36 +116,12 @@ AddrSpace::AddrSpace(OpenFile *executable)
 						// a separate page, we could set its 
 						// pages to be read-only
     }
-	
-	memMap->Print();
-    
-// zero out the entire address space, to zero the unitialized data segment 
-// and the stack segment
-//    bzero(machine->mainMemory, size); rm for Solaris
-	//Edited version adds startPage * PageSize to the address. Hopefully this is proper.
-	//Either way, it appears to zero out only however much memory is needed,
-	//so zeroing out all memory doesn't seem to be an issue. - Devin
-	
-	//pAddr = startPage * PageSize;
-	
-    //memset(machine->mainMemory + pAddr, 0, size);
 
-// then, copy in the code and data segments into memory
-//Change these too since they assume virtual page = physical page
-	  //Fix this by adding startPage times page size as an offset
-    /*if (noffH.code.size > 0) {
-        DEBUG('a', "Initializing code segment, at 0x%x, size %d\n", 
-			noffH.code.virtualAddr + (startPage * PageSize), noffH.code.size);
-        executable->ReadAt(&(machine->mainMemory[noffH.code.virtualAddr + pAddr]),
-			noffH.code.size, noffH.code.inFileAddr);
-    }
-    if (noffH.initData.size > 0) {
-        DEBUG('a', "Initializing data segment, at 0x%x, size %d\n", 
-			noffH.initData.virtualAddr + (startPage * PageSize), noffH.initData.size);
-        executable->ReadAt(&(machine->mainMemory[noffH.initData.virtualAddr + pAddr]),
-			noffH.initData.size, noffH.initData.inFileAddr);
-    }*/
 }
+ 
+
+
+
 
 //----------------------------------------------------------------------
 // AddrSpace::~AddrSpace
@@ -131,8 +135,14 @@ AddrSpace::~AddrSpace()
 {
 	if(pageTable != NULL){
 		for(unsigned i = 0; i < numPages; i++) {
-			if(pageTable[i].valid == 1)
+			if(pageTable[i].valid == 1) {
 				memMap->Clear(pageTable[i].physicalPage);
+				invPageTable[pageTable[i].physicalPage].processThread = NULL;
+				invPageTable[pageTable[i].physicalPage].time = 0;
+				invPageTable[pageTable[i].physicalPage].process = -1;
+				invPageTable[pageTable[i].physicalPage].page = -1;
+				
+			}
 			pageTable[i].valid = 0;
 			pageTable[i].dirty = 0;
 		}
@@ -151,8 +161,7 @@ AddrSpace::~AddrSpace()
 //	when this thread is context switched out.
 //----------------------------------------------------------------------
 
-void
-AddrSpace::InitRegisters()
+void AddrSpace::InitRegisters()
 {
     int i;
 
@@ -197,3 +206,230 @@ void AddrSpace::RestoreState()
     machine->pageTable = pageTable;
     machine->pageTableSize = numPages;
 }
+
+void AddrSpace::GenerateSWAP(OpenFile *executable, int ID)  {
+
+
+    NoffHeader noffH;
+    unsigned int size;
+
+    executable->ReadAt((char *)&noffH, sizeof(noffH), 0);
+    if ((noffH.noffMagic != NOFFMAGIC) && 
+		(WordToHost(noffH.noffMagic) == NOFFMAGIC))
+    	SwapHeader(&noffH);
+    ASSERT(noffH.noffMagic == NOFFMAGIC);
+
+// how big is address space?
+    size = noffH.code.size + noffH.initData.size + noffH.uninitData.size + UserStackSize;
+
+    numPages = divRoundUp(size, PageSize);
+    size = numPages * PageSize;
+
+	char filename[100];
+	sprintf(filename, "%d.swap", ID);
+	//printf("\nfileSystem->Create(\"%s\")", filename);
+	fileSystem->Create(filename, size);
+	OpenFile* swapFile = fileSystem->Open(filename);
+	
+	char swapData[size];
+
+	bzero((void*)swapData, size);
+
+	if (noffH.code.size > 0)
+        executable->ReadAt(&swapData[noffH.code.virtualAddr], noffH.code.size, noffH.code.inFileAddr);
+
+	if (noffH.initData.size > 0)
+		executable->ReadAt(&swapData[noffH.initData.virtualAddr], noffH.initData.size, noffH.initData.inFileAddr);
+
+	//printf("SWAPFILE\n");
+
+	//for(int i = 0; i < size; i++) printf("%x", swapData[i]);
+
+	swapFile->Write(swapData, size);
+
+	delete swapFile;
+
+	/*printf("READFILE\n");
+
+	OpenFile* readFile = fileSystem->Open("1.swap");
+	char readData[readFile->Length()];
+
+	readFile->Read(readData, readFile->Length());
+	
+	for(int i = 0; i < size; i++) printf("%x", readData[i]);
+
+	delete readFile;*/
+/*
+// zero out the entire address space, to zero the unitialized data segment
+// and the stack segment
+    //bzero(machine->mainMemory, size); rm for Solaris
+	//Edited version adds startPage * PageSize to the address. Hopefully this is proper.
+	//Either way, it appears to zero out only however much memory is needed,
+	//so zeroing out all memory doesn't seem to be an issue. - Devin
+
+	pAddr = startPage * PageSize;
+
+    memset(machine->mainMemory + pAddr, 0, size);
+//then, copy in the code and data segments into memory
+//Change these too since they assume virtual page = physical page
+	  //Fix this by adding startPage times page size as an offset
+    if (noffH.code.size > 0) {
+        DEBUG('a', "Initializing code segment, at 0x%x, size %d\n", 
+			noffH.code.virtualAddr + (startPage * PageSize), noffH.code.size);
+        executable->ReadAt(&(machine->mainMemory[noffH.code.virtualAddr + pAddr]),
+			noffH.code.size, noffH.code.inFileAddr);
+    }
+    if (noffH.initData.size > 0) {
+        DEBUG('a', "Initializing data segment, at 0x%x, size %d\n", 
+			noffH.initData.virtualAddr + (startPage * PageSize), noffH.initData.size);
+        executable->ReadAt(&(machine->mainMemory[noffH.initData.virtualAddr + pAddr]),
+			noffH.initData.size, noffH.initData.inFileAddr);
+    }
+
+	*/
+
+}
+
+
+
+
+
+
+
+int FrameSearch() {
+	int finalAns = -1;
+	int O = 0;
+	int ans = -1;
+	//invPageTableSemaphore.P();
+	switch(swapMode) {
+		case 0:
+			printf("\nBorking NachOS by Process %d\n", currentThread->getID());
+			break;
+		case 1:
+	
+			for(int i = 0; i < 32; i++) {
+				if(invPageTable[i].time > O) {
+					O = invPageTable[i].time;
+					ans = i;
+				}
+			}
+			finalAns = ans;
+
+			break;
+		case 2:
+			finalAns = Random() % 32;
+			break;
+	}
+	//invPageTableSemaphore.V();
+	return finalAns;
+}
+
+
+
+
+
+
+void AddrSpace::KillSWAP(int theThreadID)
+{
+	char filename[100];
+	sprintf(filename, "%d.swap", theThreadID);
+
+	
+
+	//printf("\nfileSystem->Remove(\"%s\")", filename);
+	fileSystem->Remove(filename);
+}
+
+
+
+
+
+
+
+
+
+
+int AddrSpace::PageFaultLoadPage(int pageFaultAddr, int theThreadID) {
+	invPageTableSemaphore.P();
+	memMap->Print();
+	int page = pageFaultAddr / PageSize;
+	int pageOffset = page * PageSize;
+
+	int frame = memMap->Find();
+	int frameOffset = frame * PageSize;
+		
+	//printf("\tpage: %d\tframe: %d\tPageSize: %d\tframeOffset: %d\t", page, frame, PageSize, frameOffset);
+
+	if(-1 == frame)
+	{
+		printf("\nNo open Frames\n");
+		frame = FrameSearch();
+		//printf("frame: %d, process: %d, %d\n", frame, invPageTable[frame].process, invPageTable[frame].processThread->getID());
+		
+		if(-1 != frame) {
+			
+			frameOffset = frame * PageSize;
+
+			int physicalOffset = frame * PageSize;
+			int virtualOffset = invPageTable[frame].page * PageSize;
+			
+			char filename[100];
+			sprintf(filename, "%d.swap", invPageTable[frame].process);
+			
+			OpenFile* writeFile = fileSystem->Open(filename);
+			
+			char writeData[PageSize];
+			
+			for(int i = 0; i < PageSize; i++)
+				writeData[i] = machine->mainMemory[physicalOffset + i];
+			
+			writeFile->WriteAt(writeData, PageSize, virtualOffset);
+
+			invPageTable[frame].processThread->space->pageTable[invPageTable[frame].page].valid = FALSE;
+
+			delete writeFile;
+
+		}
+	}
+	if(-1 == frame) {
+		return 1;
+	}
+	//empty frame found
+	char filename[100];
+	sprintf(filename, "%d.swap", theThreadID);
+
+
+	//printf("\nfileSystem->Open(\"%s\")", filename);
+
+	OpenFile* readFile = fileSystem->Open(filename);
+	char readData[PageSize];
+
+	readFile->ReadAt(readData, PageSize, pageOffset);
+	
+	//printf("\nREADFILE:\n");
+	//for(int i = 0; i < PageSize; i++) printf("%x", readData[i]);
+
+	delete readFile;
+	//printf("frameOffset=%d.", frameOffset);
+	for(int i = 0; i < PageSize; i++)
+		machine->mainMemory[frameOffset + i] = readData[i];
+
+	
+	pageTable[page].valid = TRUE;
+	pageTable[page].virtualPage = page;
+	pageTable[page].physicalPage = frame;
+		
+	for(int i = 0; i < 32; i++)
+		invPageTable[i].time++;
+	invPageTable[frame].time = 0;
+	invPageTable[frame].process = theThreadID;
+	invPageTable[frame].processThread = currentThread;
+	invPageTable[frame].page = page;
+		
+	memMap->Print();
+	invPageTableSemaphore.V();
+
+	return 0;
+	
+}	
+
