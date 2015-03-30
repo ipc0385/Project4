@@ -28,8 +28,8 @@ StartProcess(char *filename)
     AddrSpace *space;
 
     if (executable == NULL) {
-	printf("Unable to open file %s\n", filename);
-	return;
+		printf("Unable to open file %s\n", filename);
+		return;
     }
 	
 	printf("Memory allocation method chosen: ");
@@ -41,6 +41,7 @@ StartProcess(char *filename)
 		printf("Worst-fit.\n");
 	
     space = new AddrSpace(executable);    
+	space->GenerateSWAP(executable, 0);
     currentThread->space = space;
 
     delete executable;			// close file
